@@ -28,10 +28,10 @@ import google.genai as genai
 import yfinance as yf
 from google.adk.agents import LlmAgent
 from google.adk.models import Gemini
-from google.adk.workflow import Edge, FunctionNode, Workflow
+from google.adk.workflow import START, Edge, FunctionNode, Workflow
 from google.genai import types
 
-import config  # single source of truth for all settings
+from . import config  # single source of truth for all settings
 
 # ---------------------------------------------------------------------------
 # LLM client — GOOGLE_API_KEY already loaded from .env by config.py
@@ -50,7 +50,7 @@ _model = Gemini(
 # ============================================================
 # NODE 1 — resolve_input  (FunctionNode, NO LLM)
 # ============================================================
-def resolve_input(ctx: Any, query: str = "") -> str:
+def resolve_input(ctx: Any, node_input: str = "") -> str:
     """Parse the incoming query and resolve it to a stock ticker.
 
     Accepts both:
@@ -64,6 +64,7 @@ def resolve_input(ctx: Any, query: str = "") -> str:
     Route 'resolved'  ->  fetch_fundamentals
     Route 'error'     ->  error_output
     """
+    query = node_input  # user's typed input arrives here (str, via node_input)
     # ── 1. Decode base64 payloads (Cloud events) ──────────────────────────
     try:
         decoded = base64.b64decode(query.strip()).decode("utf-8")
@@ -90,13 +91,15 @@ def resolve_input(ctx: Any, query: str = "") -> str:
         ctx.actions.state_delta["error"] = (
             "Empty query — please provide a ticker symbol or company name."
         )
-        return "error"
+        ctx.route = "error"
+        return None
 
     # ── 4. Resolve company name → ticker via TICKER_MAP ───────────────────
     ticker = config.TICKER_MAP.get(raw, raw)
 
     ctx.actions.state_delta["ticker"] = ticker
-    return "resolved"
+    ctx.route = "resolved"
+    return None
 
 
 # ============================================================
@@ -314,6 +317,8 @@ root_agent = Workflow(
         interpret,                # 3 — plain-English commentary  (LLM)
     ],
     edges=[
+        # Entry point: graph execution starts at resolve_input
+        Edge(from_node=START, to_node=node_resolve),
         # Happy path: ticker resolved → fetch data
         Edge(from_node=node_resolve, to_node=node_fetch,  route="resolved"),
         # Error path: query unresolvable → clean error response
