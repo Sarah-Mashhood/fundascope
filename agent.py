@@ -32,7 +32,7 @@ from google.adk.workflow import START, Edge, FunctionNode, Workflow
 from google.genai import types
 
 from . import config  # single source of truth for all settings
-
+from . import security
 # ---------------------------------------------------------------------------
 # LLM client — GOOGLE_API_KEY already loaded from .env by config.py
 # ---------------------------------------------------------------------------
@@ -84,6 +84,16 @@ def resolve_input(ctx: Any, node_input: str = "") -> str:
         except Exception:
             pass
 
+    # ── Security screen: reject prompt-injection / advice-seeking input ──
+    if security.is_malicious_input(q):
+        ctx.actions.state_delta["error"] = (
+            "Input rejected by security screen: the request contained "
+            "instructions or advice-seeking language. FundaScope only accepts "
+            "a ticker symbol or company name."
+        )
+        ctx.route = "error"
+        return None
+    
     raw = q.strip().upper()
 
     # ── 3. Guard: empty query ──────────────────────────────────────────────
@@ -287,6 +297,7 @@ interpret = LlmAgent(
 node_resolve = FunctionNode(func=resolve_input,    name="resolve_input")
 node_fetch   = FunctionNode(func=fetch_fundamentals, name="fetch_fundamentals")
 node_error   = FunctionNode(func=error_output,     name="error_output")
+node_guardrail = FunctionNode(func=security.guardrail, name="guardrail")
 # `interpret` is already an LlmAgent (a BaseNode subtype) — used directly
 
 #  State flow summary:
@@ -315,6 +326,7 @@ root_agent = Workflow(
         node_fetch,               # 2 — yfinance fetch & compute (no LLM)
         node_error,               # terminal error branch         (no LLM)
         interpret,                # 3 — plain-English commentary  (LLM)
+        node_guardrail,           # 4 — output safety layer       (no LLM)
     ],
     edges=[
         # Entry point: graph execution starts at resolve_input
@@ -325,5 +337,7 @@ root_agent = Workflow(
         Edge(from_node=node_resolve, to_node=node_error,  route="error"),
         # After data fetch → always run the interpret LLM node
         Edge(from_node=node_fetch,   to_node=interpret),
+        # After interpretation → run the output guardrail (security layer)
+        Edge(from_node=interpret,    to_node=node_guardrail),
     ],
 )
